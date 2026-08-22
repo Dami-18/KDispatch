@@ -160,12 +160,24 @@ void reader_loop(std::vector<int> fds, const std::uint64_t* intended,
     ::close(epfd);
 }
 
-void run_thread(const Cfg& cfg, int tid, int nconn, ThreadResult* res) {
+void run_thread(const Cfg& cfg, int tid, int conn_base, int nconn, ThreadResult* res) {
     std::vector<int> fds;
     for (int i = 0; i < nconn; ++i) {
         int fd = dial(cfg);
         if (fd < 0) { std::fprintf(stderr, "connect failed\n"); std::exit(1); }
         fds.push_back(fd);
+
+        // Announce this connection's id. Arm B cannot tell which transport a
+        // message arrived on, so the server learns conn_id -> fd here, before
+        // the socket is handed to KCM. Not replied to.
+        MsgHeader hello{};
+        set_msg_len(hello, sizeof(MsgHeader));
+        hello.flags = FLAG_HELLO;
+        hello.conn_id = (std::uint32_t)(conn_base + i);
+        if (!write_all(fd, reinterpret_cast<const char*>(&hello), sizeof(hello))) {
+            std::fprintf(stderr, "hello failed\n");
+            std::exit(1);
+        }
     }
 
     auto intended = std::make_unique<std::uint64_t[]>(RING);
@@ -196,9 +208,12 @@ void run_thread(const Cfg& cfg, int tid, int nconn, ThreadResult* res) {
         const std::uint32_t len = large ? (std::uint32_t)cfg.large_size
                                         : (std::uint32_t)cfg.small_size;
 
+        const std::size_t slot = (std::size_t)(rr++) % fds.size();
+
         MsgHeader h{};
         set_msg_len(h, len);
         h.req_id = req_id;
+        h.conn_id = (std::uint32_t)(conn_base + (int)slot);
         h.work_us = large ? (std::uint32_t)cfg.large_work_us
                           : (std::uint32_t)cfg.small_work_us;
         h.cls = large ? CLS_LARGE : CLS_SMALL;
@@ -212,8 +227,7 @@ void run_thread(const Cfg& cfg, int tid, int nconn, ThreadResult* res) {
         res->max_sched_delay_ns = std::max(res->max_sched_delay_ns, delay);
 
         std::memcpy(payload.data(), &h, sizeof(h));
-        const int fd = fds[rr++ % fds.size()];
-        if (!write_all(fd, payload.data(), len)) break;
+        if (!write_all(fds[slot], payload.data(), len)) break;
         ++res->sent;
         res->bytes_sent += len;
         ++req_id;
@@ -261,6 +275,10 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
     if (cfg.threads > cfg.conns) cfg.threads = cfg.conns;
+    if (cfg.conns > (int)MAX_CONNS) {
+        std::fprintf(stderr, "--conns exceeds MAX_CONNS (%u)\n", MAX_CONNS);
+        return 2;
+    }
     if (cfg.small_size < (int)sizeof(MsgHeader) || cfg.large_size < (int)sizeof(MsgHeader)) {
         std::fprintf(stderr, "sizes must be >= %zu\n", sizeof(MsgHeader));
         return 2;
@@ -269,9 +287,11 @@ int main(int argc, char** argv) {
     std::vector<ThreadResult> results((std::size_t)cfg.threads);
     std::vector<std::thread> ts;
     const int base = cfg.conns / cfg.threads, extra = cfg.conns % cfg.threads;
+    int conn_base = 0;
     for (int t = 0; t < cfg.threads; ++t) {
         const int n = base + (t < extra ? 1 : 0);
-        ts.emplace_back(run_thread, std::cref(cfg), t, n, &results[(std::size_t)t]);
+        ts.emplace_back(run_thread, std::cref(cfg), t, conn_base, n, &results[(std::size_t)t]);
+        conn_base += n;
     }
     for (auto& t : ts) t.join();
 
