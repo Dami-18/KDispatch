@@ -1,5 +1,5 @@
 # build output
-build/
+build*/
 figs/
 compile_commands.json
 *.o
