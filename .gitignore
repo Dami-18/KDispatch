@@ -1,0 +1,11 @@
+build/
+figs/
+compile_commands.json
+*.o
+*.ko
+*.mod*
+*.cmd
+Module.symvers
+modules.order
+results/*.json
+!results/.gitkeep
