@@ -22,6 +22,7 @@
 // Usage:
 //   sudo ./build/server_kcm --port 9000 --workers 4 --out results/serverB.json
 
+#include "netutil.hpp"
 #include "proto.hpp"
 #include "server_stats.hpp"
 
@@ -263,6 +264,8 @@ int main(int argc, char** argv) {
             break;
         }
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        const int rcvbuf = set_rcvbuf(fd, DEFAULT_RCVBUF);
+        if (nattached == 0) report_rcvbuf("server_kcm", rcvbuf);
 
         // Read the hello directly, before KCM owns this socket's receive path.
         timeval tv{};

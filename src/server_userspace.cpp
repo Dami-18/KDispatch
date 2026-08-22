@@ -9,6 +9,7 @@
 // Usage:
 //   server_userspace --port 9000 --workers 4 --out results/serverA.json
 
+#include "netutil.hpp"
 #include "proto.hpp"
 #include "server_stats.hpp"
 
@@ -122,6 +123,8 @@ private:
             set_nonblock(fd);
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+            const int rcvbuf = set_rcvbuf(fd, DEFAULT_RCVBUF);
+            if (stats_.conns == 0 && id_ == 0) report_rcvbuf("server_userspace", rcvbuf);
             epoll_event ev{};
             ev.events = EPOLLIN;
             ev.data.fd = fd;
