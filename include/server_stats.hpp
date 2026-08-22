@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <cerrno>
 #include <string>
 #include <vector>
 
@@ -25,7 +27,10 @@ inline void write_server_json(const std::string& path, const char* arm,
                               const std::vector<WorkerStats>& per_worker) {
     if (path.empty()) return;
     FILE* f = std::fopen(path.c_str(), "w");
-    if (!f) return;
+    if (!f) {
+        std::fprintf(stderr, "cannot write %s: %s\n", path.c_str(), std::strerror(errno));
+        return;
+    }
 
     std::uint64_t msgs = 0;
     double busy_sum = 0, busy_min = 1e9, busy_max = -1e9;

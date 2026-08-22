@@ -311,7 +311,14 @@ int main(int argc, char** argv) {
     const double achieved = (double)agg.sent / cfg.duration;
     const double goodput_mbps = (double)agg.bytes_sent * 8.0 / cfg.duration / 1e6;
 
-    FILE* f = cfg.out.empty() ? stdout : std::fopen(cfg.out.c_str(), "w");
+    FILE* f = stdout;
+    if (!cfg.out.empty()) {
+        f = std::fopen(cfg.out.c_str(), "w");
+        if (!f) {
+            std::fprintf(stderr, "cannot write %s: %s\n", cfg.out.c_str(), std::strerror(errno));
+            return 1;
+        }
+    }
     std::fprintf(f, "{\n");
     std::fprintf(f, "  \"arm\": \"%s\",\n  \"conns\": %d,\n  \"gen_threads\": %d,\n",
                  cfg.arm.c_str(), cfg.conns, cfg.threads);
