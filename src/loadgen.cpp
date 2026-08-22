@@ -45,6 +45,8 @@ namespace {
 
 constexpr std::size_t RING = 1u << 16;  // req_id -> intended send time
 
+std::atomic<bool> g_send_failed{false};
+
 struct Cfg {
     std::string host = "127.0.0.1";
     int port = 9000;
@@ -78,6 +80,11 @@ int dial(const Cfg& c) {
     if (::connect(fd, (sockaddr*)&a, sizeof(a)) < 0) { ::close(fd); return -1; }
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    // Without this a server that stops consuming wedges the generator in
+    // write() indefinitely, and the run never reaches its duration check.
+    timeval tv{};
+    tv.tv_sec = 10;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     return fd;
 }
 
@@ -227,7 +234,14 @@ void run_thread(const Cfg& cfg, int tid, int conn_base, int nconn, ThreadResult*
         res->max_sched_delay_ns = std::max(res->max_sched_delay_ns, delay);
 
         std::memcpy(payload.data(), &h, sizeof(h));
-        if (!write_all(fds[slot], payload.data(), len)) break;
+        if (!write_all(fds[slot], payload.data(), len)) {
+            std::fprintf(stderr,
+                "send stalled on conn %u after %llu messages (%s) -- server stopped "
+                "consuming\n", h.conn_id, (unsigned long long)res->sent,
+                std::strerror(errno));
+            g_send_failed.store(true, std::memory_order_relaxed);
+            break;
+        }
         ++res->sent;
         res->bytes_sent += len;
         ++req_id;
@@ -306,6 +320,11 @@ int main(int argc, char** argv) {
         agg.recvd += r.recvd;
         agg.bytes_sent += r.bytes_sent;
         agg.max_sched_delay_ns = std::max(agg.max_sched_delay_ns, r.max_sched_delay_ns);
+    }
+
+    if (g_send_failed.load(std::memory_order_relaxed)) {
+        std::fprintf(stderr, "run aborted: transmission stalled, results are not usable\n");
+        return 1;
     }
 
     const double achieved = (double)agg.sent / cfg.duration;
