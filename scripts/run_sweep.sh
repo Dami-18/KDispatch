@@ -10,6 +10,7 @@
 #   workers    server thread count          -- shows threads only dilute HOL blocking
 #   conns      connection count             -- control axis (expected flat for arm A)
 #   rate       offered load                 -- for throughput-under-SLO ladders
+#   large_size large-message payload bytes   -- probes the strparser/sk_rcvbuf ceiling
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,12 +27,14 @@ CONNS="${CONNS:-32}"
 WORKERS="${WORKERS:-4}"
 RATE="${RATE:-30000}"
 LARGE_PCT="${LARGE_PCT:-1}"
+LARGE_SIZE="${LARGE_SIZE:-262144}"
 
 case "$SWEEP" in
   large_pct) VALUES="${VALUES:-0.1 0.25 0.5 1 2 4}" ;;
   workers)   VALUES="${VALUES:-1 2 4 8 16}" ;;
   conns)     VALUES="${VALUES:-1 2 4 8 16 32 64 128}" ;;
   rate)      VALUES="${VALUES:-10000 20000 30000 50000 80000 120000}" ;;
+  large_size) VALUES="${VALUES:-16384 32768 65536 131072 262144 393216}" ;;
   *) echo "unknown sweep axis: $SWEEP" >&2; exit 2 ;;
 esac
 
@@ -45,19 +48,20 @@ esac
 
 mkdir -p "$OUTDIR"
 echo "arm=$ARM sweep=$SWEEP values=[$VALUES] repeats=$REPEATS duration=${DURATION}s"
-echo "fixed: conns=$CONNS workers=$WORKERS rate=$RATE large_pct=$LARGE_PCT"
+echo "fixed: conns=$CONNS workers=$WORKERS rate=$RATE large_pct=$LARGE_PCT large_size=$LARGE_SIZE"
 
 for v in $VALUES; do
-  c=$CONNS; w=$WORKERS; r=$RATE; lp=$LARGE_PCT
+  c=$CONNS; w=$WORKERS; r=$RATE; lp=$LARGE_PCT; ls=$LARGE_SIZE
   case "$SWEEP" in
-    large_pct) lp=$v ;;
-    workers)   w=$v ;;
-    conns)     c=$v ;;
-    rate)      r=$v ;;
+    large_pct)  lp=$v ;;
+    workers)    w=$v ;;
+    conns)      c=$v ;;
+    rate)       r=$v ;;
+    large_size) ls=$v ;;
   esac
 
   for i in $(seq 1 "$REPEATS"); do
-    tag="${ARM}_${SWEEP}${v}_c${c}_w${w}_r${r}_lp${lp}_run${i}"
+    tag="${ARM}_${SWEEP}${v}_c${c}_w${w}_r${r}_lp${lp}_ls${ls}_run${i}"
     echo "  -> $tag"
 
     "$SERVER" --port "$PORT" --workers "$w" \
@@ -75,7 +79,8 @@ for v in $VALUES; do
     threads=$(( c < 4 ? c : 4 ))
     ./build/loadgen --port "$PORT" --conns "$c" --threads "$threads" \
         --rate "$r" --duration "$DURATION" --warmup "$WARMUP" \
-        --large-pct "$lp" --arm "$ARM" --out "$OUTDIR/${tag}.json" >/dev/null
+        --large-pct "$lp" --large-size "$ls" --arm "$ARM" \
+        --out "$OUTDIR/${tag}.json" >/dev/null
 
     kill -TERM $srv 2>/dev/null || true
     wait $srv 2>/dev/null || true

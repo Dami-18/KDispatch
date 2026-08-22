@@ -28,13 +28,14 @@ def load(d):
     return runs
 
 AXES = {"large_pct": "large-message fraction (%)",
+        "large_size": "large-message size (bytes)",
         "workers": "server worker threads",
         "conns": "connections",
         "offered_rate": "offered load (msg/s)"}
 
 def axis_of(runs):
     """Pick the axis that actually varies across the loaded runs."""
-    for k in ("large_pct", "workers", "conns", "offered_rate"):
+    for k in ("large_pct", "large_size", "workers", "conns", "offered_rate"):
         vals = {r.get(k) if k != "workers" else r.get("server", {}).get("workers")
                 for r in runs}
         vals.discard(None)
