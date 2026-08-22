@@ -35,16 +35,29 @@ fi
 
 run() {
   local arm="$1" server="$2" port="$3"
+  local log="results/smoke_${arm}.server.log"
+
   "$server" --port "$port" --workers "$WORKERS" \
-            --out "results/smoke_${arm}.server.json" >/dev/null 2>&1 &
+            --out "results/smoke_${arm}.server.json" > "$log" 2>&1 &
   local srv=$!
+  # A failure anywhere below must not leave the server holding the port.
+  trap 'kill -TERM '"$srv"' 2>/dev/null || true' EXIT
   sleep 0.7
+
+  if ! kill -0 "$srv" 2>/dev/null; then
+    echo "$arm server failed to start:" >&2
+    sed 's/^/  /' "$log" >&2
+    exit 1
+  fi
+
   ./build/loadgen --port "$port" --conns "$CONNS" --threads 4 \
       --rate "$RATE" --duration "$DURATION" --warmup "$WARMUP" \
       --large-pct "$LARGE_PCT" --arm "$arm" \
       --out "results/smoke_${arm}.json" >/dev/null
+
   kill -TERM $srv 2>/dev/null || true
   wait $srv 2>/dev/null || true
+  trap - EXIT
   sleep 0.5
 }
 

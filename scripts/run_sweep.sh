@@ -61,10 +61,16 @@ for v in $VALUES; do
     echo "  -> $tag"
 
     "$SERVER" --port "$PORT" --workers "$w" \
-              --out "$OUTDIR/${tag}.server.json" >/dev/null 2>&1 &
+              --out "$OUTDIR/${tag}.server.json" > "$OUTDIR/${tag}.server.log" 2>&1 &
     srv=$!
     trap 'kill -TERM $srv 2>/dev/null || true' EXIT
     sleep 0.5
+
+    if ! kill -0 "$srv" 2>/dev/null; then
+      echo "server failed to start:" >&2
+      sed 's/^/  /' "$OUTDIR/${tag}.server.log" >&2
+      exit 1
+    fi
 
     threads=$(( c < 4 ? c : 4 ))
     ./build/loadgen --port "$PORT" --conns "$c" --threads "$threads" \
