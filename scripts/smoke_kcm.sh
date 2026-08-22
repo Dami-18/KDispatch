@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
 # Side-by-side arm A vs arm B at one operating point.
 #
-# Arm B loads a BPF stream parser, which needs CAP_BPF:
-#   sudo scripts/smoke_kcm.sh
+# Arm B loads a BPF stream parser, which needs CAP_BPF. Either run the whole
+# script under sudo, or grant the binary the capability once:
+#
+#   sudo scripts/setcap.sh     # then run this script unprivileged
+#   sudo scripts/smoke_kcm.sh  # or just run the whole thing as root
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if [[ $EUID -ne 0 ]] && ! getcap build/server_kcm 2>/dev/null | grep -q cap_bpf; then
+  echo "server_kcm cannot load its BPF parser as an unprivileged user." >&2
+  echo "run 'sudo scripts/setcap.sh' once, or re-run this script under sudo." >&2
+  exit 1
+fi
 
 CONNS="${CONNS:-32}"
 WORKERS="${WORKERS:-4}"
