@@ -31,7 +31,7 @@ struct kd_stats {
 	__u32 conns;     /* attached transports */
 	__u32 pauses;    /* times backpressure paused a parser */
 	__u32 aborts;    /* parser aborts (protocol errors, resets) */
-	__u32 _pad;
+	__u32 desync;    /* messages whose length prefix disagreed with full_len */
 };
 
 #define KD_IOC_MAGIC 'K'

@@ -71,7 +71,7 @@ struct kd_dev {
 	struct list_head conns;
 	struct mutex attach_lock;   /* serialises attach/teardown */
 
-	u32 qlen, qmax, nconns, pauses, aborts;
+	u32 qlen, qmax, nconns, pauses, aborts, desync;
 	u64 msgs, bytes;
 	int opens;
 	bool draining;
@@ -85,15 +85,22 @@ static struct kd_dev kd;
  * Total message length lives in the first four bytes, big-endian. strparser
  * reads the return value as: >0 complete message length, 0 need more bytes,
  * <0 protocol error (which tears the connection down).
+ *
+ * Read at strp_msg(skb)->offset, not at zero. When several messages arrive
+ * coalesced -- which happens as soon as a backlog is buffered at attach time --
+ * strparser passes a head skb that still contains the preceding message, with
+ * this message starting at ->offset. Parsing at zero then decodes the previous
+ * header, and delivery (which does honour ->offset) disagrees with it.
  */
 static int kd_parse_msg(struct strparser *strp, struct sk_buff *skb)
 {
+	int offset = strp_msg(skb)->offset;
 	__be32 hdr;
 	u32 len;
 
-	if (skb->len < sizeof(hdr))
+	if (offset < 0 || skb->len < offset + (int)sizeof(hdr))
 		return 0;
-	if (skb_copy_bits(skb, 0, &hdr, sizeof(hdr)) < 0)
+	if (skb_copy_bits(skb, offset, &hdr, sizeof(hdr)) < 0)
 		return 0;
 
 	len = be32_to_cpu(hdr);
@@ -336,6 +343,33 @@ static ssize_t kd_read(struct file *file, char __user *ubuf, size_t count,
 	kd_maybe_unpause(dev);
 
 	stm = strp_msg(skb);
+
+	/* The four bytes we are about to deliver must be this message's own
+	 * length prefix. If they are not, the delivery offset and the offset
+	 * the parser read from have diverged, and userspace would decode a
+	 * header out of the middle of the stream.
+	 */
+	{
+		__be32 hdr;
+		u32 declared;
+
+		if (skb_copy_bits(skb, stm->offset, &hdr, sizeof(hdr)) < 0)
+			declared = 0;
+		else
+			declared = be32_to_cpu(hdr);
+
+		if (declared != (u32)stm->full_len) {
+			spin_lock_irqsave(&dev->lock, flags);
+			dev->desync++;
+			spin_unlock_irqrestore(&dev->lock, flags);
+			pr_warn_ratelimited(
+				"desync: prefix=%u full_len=%d offset=%d -- dropping\n",
+				declared, stm->full_len, stm->offset);
+			kfree_skb(skb);
+			return -EPROTO;
+		}
+	}
+
 	len = min_t(int, stm->full_len, (int)count);
 
 	err = import_ubuf(ITER_DEST, ubuf, len, &to);
@@ -375,6 +409,7 @@ static long kd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		st.conns = dev->nconns;
 		st.pauses = dev->pauses;
 		st.aborts = dev->aborts;
+		st.desync = dev->desync;
 		spin_unlock_irqrestore(&dev->lock, flags);
 		if (copy_to_user((void __user *)arg, &st, sizeof(st)))
 			return -EFAULT;
@@ -393,7 +428,22 @@ static long kd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 static int kd_open(struct inode *inode, struct file *file)
 {
 	mutex_lock(&kd.attach_lock);
-	kd.opens++;
+	if (kd.opens++ == 0) {
+		/* First opener owns the device: start counters from zero so each
+		 * server run reports its own numbers rather than inheriting the
+		 * previous one's.
+		 */
+		unsigned long flags;
+
+		spin_lock_irqsave(&kd.lock, flags);
+		kd.msgs = 0;
+		kd.bytes = 0;
+		kd.qmax = 0;
+		kd.pauses = 0;
+		kd.aborts = 0;
+		kd.desync = 0;
+		spin_unlock_irqrestore(&kd.lock, flags);
+	}
 	kd.draining = false;
 	mutex_unlock(&kd.attach_lock);
 	return 0;

@@ -95,6 +95,7 @@ void worker_loop(int devfd, WorkerStats* stats) {
         if (n == 0) break;                       // module draining
         if (n < 0) {
             if (errno == EINTR || errno == EAGAIN) continue;
+            if (errno == EPROTO) continue;   // module dropped a desynced message
             std::fprintf(stderr, "read: %s\n", std::strerror(errno));
             break;
         }
@@ -103,6 +104,13 @@ void worker_loop(int devfd, WorkerStats* stats) {
         MsgHeader h{};
         std::memcpy(&h, buf.get(), sizeof(h));
         stats->bytes_in += (std::uint64_t)n;
+
+        if (h.work_us > MAX_WORK_US || msg_len(h) != (std::uint32_t)n) {
+            std::fprintf(stderr,
+                "rejecting malformed message: len=%u read=%zd work_us=%u conn=%u\n",
+                msg_len(h), (ssize_t)n, h.work_us, h.conn_id);
+            continue;
+        }
 
         if (!(h.flags & FLAG_HELLO)) {
             busy_spin_us(h.work_us);
@@ -225,8 +233,8 @@ int main(int argc, char** argv) {
     kd_stats ks{};
     if (::ioctl(g_devfd, KD_STATS, &ks) == 0) {
         std::fprintf(stderr,
-            "[server_module] module: msgs=%llu qmax=%u pauses=%u aborts=%u conns=%u\n",
-            (unsigned long long)ks.msgs, ks.qmax, ks.pauses, ks.aborts, ks.conns);
+            "[server_module] module: msgs=%llu qmax=%u pauses=%u aborts=%u desync=%u conns=%u\n",
+            (unsigned long long)ks.msgs, ks.qmax, ks.pauses, ks.aborts, ks.desync, ks.conns);
     }
 
     for (auto& s : stats) s.conns = nattached / (std::uint64_t)std::max(1, nworkers);

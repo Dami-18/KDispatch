@@ -29,6 +29,10 @@ inline constexpr std::uint32_t MAX_CONNS = 4096;
 // connection, so a corrupt length prefix cannot make us allocate wildly.
 inline constexpr std::uint32_t MAX_MSG = 8u * 1024 * 1024;
 
+// Upper bound on simulated RPC work. A corrupted header must not be able to
+// park a worker for hours in the busy-spin.
+inline constexpr std::uint32_t MAX_WORK_US = 1'000'000;
+
 struct __attribute__((packed)) MsgHeader {
     std::uint32_t len;      // big-endian, TOTAL bytes including this header
     std::uint32_t req_id;   // unique per generator thread
