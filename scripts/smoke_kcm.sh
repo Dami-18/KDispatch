@@ -11,7 +11,8 @@ cd "$(dirname "$0")/.."
 
 if [[ $EUID -ne 0 ]] && ! getcap build/server_kcm 2>/dev/null | grep -q cap_bpf; then
   echo "server_kcm cannot load its BPF parser as an unprivileged user." >&2
-  echo "run 'sudo scripts/setcap.sh' once, or re-run this script under sudo." >&2
+  echo "run 'sudo scripts/setcap.sh', or re-run this script under sudo." >&2
+  echo "note: file capabilities are dropped on every rebuild of server_kcm." >&2
   exit 1
 fi
 
@@ -24,6 +25,13 @@ LARGE_PCT="${LARGE_PCT:-1}"
 
 modprobe kcm 2>/dev/null || true
 mkdir -p results
+
+# Under sudo every result file lands owned by root, which then makes later
+# unprivileged runs fail to reopen them. Hand them back on the way out,
+# including on failure.
+if [[ -n "${SUDO_USER:-}" ]]; then
+  trap 'chown -R "$SUDO_USER" results/ 2>/dev/null || true' EXIT
+fi
 
 run() {
   local arm="$1" server="$2" port="$3"
@@ -65,5 +73,3 @@ if len(rows) == 2:
     print(f"p99.9 improvement: {rows[0][5]/rows[1][5]:.2f}x")
 PY
 
-# result files land as root when run under sudo
-if [[ -n "${SUDO_USER:-}" ]]; then chown -R "$SUDO_USER" results/ 2>/dev/null || true; fi
