@@ -14,9 +14,10 @@ find_package(Threads REQUIRED)
 
 add_executable(server_userspace src/server_userspace.cpp)
 add_executable(server_kcm       src/server_kcm.cpp)
+add_executable(server_module    src/server_module.cpp)
 add_executable(loadgen          src/loadgen.cpp)
 
-foreach(tgt server_userspace server_kcm loadgen)
+foreach(tgt server_userspace server_kcm server_module loadgen)
   target_include_directories(${tgt} PRIVATE include)
   target_link_libraries(${tgt} PRIVATE Threads::Threads)
   target_compile_options(${tgt} PRIVATE -Wall -Wextra)
