@@ -16,6 +16,14 @@ inline constexpr std::uint16_t CLS_SMALL = 0;
 inline constexpr std::uint16_t CLS_LARGE = 1;
 
 inline constexpr std::uint16_t FLAG_REPLY = 1u << 0;
+// First message on every connection, carrying its conn_id. Arm B needs it:
+// KCM hands a worker a complete message with no indication of which transport
+// socket it arrived on, so the server must learn conn_id -> fd up front in
+// order to reply on the originating connection.
+inline constexpr std::uint16_t FLAG_HELLO = 1u << 1;
+
+// Upper bound on conn_id, sizing the server's conn_id -> fd table.
+inline constexpr std::uint32_t MAX_CONNS = 4096;
 
 // Guard rail for the reassembly path: refuse anything larger and drop the
 // connection, so a corrupt length prefix cannot make us allocate wildly.
@@ -27,10 +35,12 @@ struct __attribute__((packed)) MsgHeader {
     std::uint64_t send_ns;  // actual send timestamp (CLOCK_MONOTONIC_RAW)
     std::uint32_t work_us;  // server busy-spins this long, simulating RPC work
     std::uint16_t cls;      // CLS_SMALL / CLS_LARGE
-    std::uint16_t flags;    // FLAG_REPLY on the server's response
+    std::uint16_t flags;    // FLAG_REPLY / FLAG_HELLO
+    std::uint32_t conn_id;  // which connection this arrived on
+    std::uint32_t reserved;
 };
 
-static_assert(sizeof(MsgHeader) == 24, "wire header must stay 24 bytes");
+static_assert(sizeof(MsgHeader) == 32, "wire header must stay 32 bytes");
 
 inline std::uint32_t msg_len(const MsgHeader& h) { return be32toh(h.len); }
 inline void set_msg_len(MsgHeader& h, std::uint32_t n) { h.len = htobe32(n); }
