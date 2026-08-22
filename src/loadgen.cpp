@@ -17,6 +17,7 @@
 //           --duration 30 --warmup 5 --out results/run.json
 
 #include "hist.hpp"
+#include "netutil.hpp"
 #include "proto.hpp"
 
 #include <arpa/inet.h>
@@ -296,6 +297,23 @@ int main(int argc, char** argv) {
     if (cfg.small_size < (int)sizeof(MsgHeader) || cfg.large_size < (int)sizeof(MsgHeader)) {
         std::fprintf(stderr, "sizes must be >= %zu\n", sizeof(MsgHeader));
         return 2;
+    }
+
+    // A message larger than the server's sk_rcvbuf kills the connection under
+    // arm B. Probe the local ceiling and warn before burning a whole run.
+    {
+        const int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (probe >= 0) {
+            const int eff = set_rcvbuf(probe, DEFAULT_RCVBUF);
+            ::close(probe);
+            if (cfg.large_size > eff) {
+                std::fprintf(stderr,
+                    "--large-size %d exceeds the achievable sk_rcvbuf (%d). Arm B will "
+                    "abort its connections. Lower --large-size or raise "
+                    "net.core.rmem_max.\n", cfg.large_size, eff);
+                return 2;
+            }
+        }
     }
 
     std::vector<ThreadResult> results((std::size_t)cfg.threads);

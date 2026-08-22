@@ -55,6 +55,8 @@ using namespace kd;
 namespace {
 
 std::atomic<bool> g_stop{false};
+// Published so workers can name the real cause when a connection dies.
+std::atomic<int> g_rcvbuf{0};
 void on_signal(int) { g_stop.store(true, std::memory_order_relaxed); }
 
 // conn_id -> transport fd, published by the accept thread, read by every worker.
@@ -150,6 +152,16 @@ void worker_loop(int kcm_fd, WorkerStats* stats) {
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+            // EMSGSIZE here means strparser hit a message longer than
+            // sk_rcvbuf and tore the connection down.
+            if (errno == EMSGSIZE) {
+                std::fprintf(stderr,
+                    "recv: EMSGSIZE -- a message exceeded sk_rcvbuf (%d bytes); "
+                    "strparser aborts the connection rather than buffering it\n",
+                    g_rcvbuf.load(std::memory_order_relaxed));
+            } else {
+                std::fprintf(stderr, "recv: %s\n", std::strerror(errno));
+            }
             break;
         }
         if (n == 0 || (std::size_t)n < sizeof(MsgHeader)) continue;
@@ -266,6 +278,7 @@ int main(int argc, char** argv) {
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         const int rcvbuf = set_rcvbuf(fd, DEFAULT_RCVBUF);
         if (nattached == 0) report_rcvbuf("server_kcm", rcvbuf);
+        g_rcvbuf.store(rcvbuf, std::memory_order_relaxed);
 
         // Read the hello directly, before KCM owns this socket's receive path.
         timeval tv{};
