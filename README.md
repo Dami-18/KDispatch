@@ -15,7 +15,7 @@ the wire to a worker thread.
 | Arm | What it does | Status |
 | --- | --- | --- |
 | **A — userspace** | epoll server, per-connection reassembly, workers sharded by connection (what gRPC-style stacks do) | done |
-| **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message | planned |
+| **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message | done |
 | **C — module** | custom kernel module on `strparser` with a single shared, work-conserving message queue | stretch |
 
 Scoped-down exploration of ideas from
@@ -25,13 +25,82 @@ Rakaia does work-conserving scheduling in the TCP receive path with kTLS support
 and a patched gRPC. KDispatch reproduces the *problem* and measures how far the
 existing in-kernel message API gets you.
 
-## Early results (arm A)
+## Results
 
-128 B / 10 µs "small" messages, with a fraction of 256 KB / 2 ms "large" ones
-mixed in. 32 connections, 30k msg/s offered, 4-second runs.
+Workload: 128 B / 10 µs "small" RPCs, with 1% "large" ones carrying an identical
+128 B payload but 2 ms of service time. Equal payloads on purpose — that isolates
+**dispatch** from byte movement, so what is measured is scheduling, not copying.
+32 connections, 30k msg/s offered, 5 s runs, median of 2 repeats.
 
-Sweeping the large-message fraction — the tail tracks one large-message
-service time and then collapses once workers saturate:
+![small-message p99 vs worker threads](docs/p99_small_by_workers.png)
+
+| workers | A p99 | B p99 | B/A | A p99.9 | B p99.9 | B/A |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 5.4 ms | 111.6 ms | 20.5× | 8.5 ms | 150.6 ms | 17.7× |
+| 4 | 2.7 ms | 181.6 ms | 66.8× | 4.6 ms | 257.8 ms | 55.8× |
+| 8 | 1.8 ms | 1.7 ms | 0.95× | 3.3 ms | 2.8 ms | 0.82× |
+| 16 | 1.3 ms | 1.3 ms | 1.01× | 2.0 ms | 1.7 ms | 0.85× |
+| 32 | 0.57 ms | 0.61 ms | 1.07× | 1.5 ms | 1.2 ms | 0.83× |
+
+### Moving framing into the kernel does not fix head-of-line blocking
+
+This is the headline, and it is a negative result for KCM. Once there are enough
+worker threads, arm B is **indistinguishable from userspace reassembly** on p99
+(0.95×–1.07×) and only marginally better on p99.9 (~0.85×). Small messages still
+wait roughly one large-message service time behind large ones.
+
+Framing is not the bottleneck. KCM removes the reassembly buffers, the partial
+reads, and the per-connection userspace state — and the tail barely moves. What
+governs the tail is the *dispatch policy*, which KCM does not change.
+
+That is precisely the gap Rakaia targets: the paper reports up to **5× higher
+throughput-under-SLO than KCM**, and this measurement is an independent
+reproduction of why that headroom exists. It is also the argument for arm C —
+an in-kernel message API is necessary but not sufficient; the scheduling has to
+be work-conserving.
+
+### KCM collapses when workers are scarce
+
+At 2 and 4 workers arm B is catastrophically worse — 20× and 67× the baseline
+tail. A KCM socket is *reserved* to a connection while a message is outstanding,
+so a worker busy running an RPC keeps its clone unavailable; with few clones,
+`reserve_rx_kcm` finds no waiting socket, strparser pauses the transport, and the
+backlog runs away. Arm A degrades gracefully over the same range.
+
+Two honest caveats on this row:
+
+- **It is bimodal.** Ad-hoc 4-worker runs during development produced ~2.5 ms,
+  not 181 ms. Some runs enter the pathological state and some do not; the
+  trigger is not yet identified.
+- **Messages go missing.** At 2 and 4 workers, `recvd` falls short of `sent` by
+  0.1–0.4% (414 and 1242 of ~300k). Every other configuration reconciles
+  exactly. Unexplained, and it means those two rows should be read as "KCM
+  misbehaves here", not as a trustworthy latency number.
+
+The reservation mechanism above is a **hypothesis** consistent with the data, not
+something this repo has proven. Confirming it needs tracing inside `kcm_rcv_strparser`.
+
+### Two undocumented buffer ceilings
+
+Getting arm B to run at all meant discovering that a message must fit in *two*
+independent receive buffers:
+
+1. **The transport socket's `sk_rcvbuf`.** `strparser` rejects anything longer
+   with `EMSGSIZE` and **aborts the connection** — it does not degrade, it dies.
+   With the stock `net.ipv4.tcp_rmem` default of 131072, every message above
+   ~128 KB kills its connection.
+2. **The KCM socket's own `sk_rcvbuf`.** Completed messages are queued against
+   it. If a message does not fit, delivery **wedges silently** — no error
+   counter anywhere in `/proc/net/kcm_stats` increments, the sender simply
+   blocks forever in `write()`.
+
+The second cost most of a debugging session. Both servers now size both buffers
+and refuse to start a run that cannot complete.
+
+### Arm A, for reference
+
+Sweeping the large-message fraction at 32 connections / 4 workers, with 256 KB
+large payloads (the earlier workload, before payloads were equalized):
 
 | large% | p50 | p99 | p99.9 |
 | --- | --- | --- | --- |
@@ -39,24 +108,9 @@ service time and then collapses once workers saturate:
 | 1% | 29.2 µs | 2.95 ms | 5.24 ms |
 | 4% | 1.08 ms | 14.7 ms | 23.6 ms |
 
-Sweeping worker threads at 1% large:
-
-| workers | p50 | p99 | p99.9 |
-| --- | --- | --- | --- |
-| 1 | 5.11 ms | 36.7 ms | 51.4 ms |
-| 2 | 36.9 µs | 5.77 ms | 9.96 ms |
-| 4 | 29.2 µs | 2.95 ms | 5.37 ms |
-| 8 | 28.2 µs | 1.90 ms | 3.60 ms |
-| 16 | 28.2 µs | 1.38 ms | 2.10 ms |
-
-The second table is the point of the project. Even at 16 workers, p99 is
-**1.38 ms against a p50 of 28 µs** — adding threads only *dilutes* head-of-line
-blocking, it never removes it, because reassembly and execution are structurally
-coupled to the same thread. Closing that gap is what arm B is for.
-
-Note that connection count on its own is a flat axis for arm A: at a fixed
-aggregate rate and worker count, adding connections does not change how often a
-small message lands behind a large one. It is kept as a control.
+Connection count on its own is a flat axis for arm A: at fixed aggregate rate and
+worker count, adding connections does not change how often a small message lands
+behind a large one. Kept as a control.
 
 ## Layout
 
@@ -75,11 +129,20 @@ scripts/plot.py            graphs from results/*.json
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+```
 
-./build/server_userspace --port 9000 --workers 4 --out results/srv.json &
-./build/loadgen --port 9000 --conns 64 --threads 4 \
-                --rate 50000 --duration 30 --warmup 5 --out results/run.json
-kill %1
+Arm B loads a BPF stream parser, which needs `CAP_BPF`. Grant it once per build
+(file capabilities live on the inode, so any relink clears them):
+
+```bash
+sudo scripts/setcap.sh
+./build/server_kcm --check-bpf        # should print "loaded OK"
+```
+
+Side-by-side comparison at one operating point:
+
+```bash
+scripts/smoke_kcm.sh
 ```
 
 Full sweep and graphs:

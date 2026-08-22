@@ -28,6 +28,7 @@ WORKERS="${WORKERS:-4}"
 RATE="${RATE:-30000}"
 LARGE_PCT="${LARGE_PCT:-1}"
 LARGE_SIZE="${LARGE_SIZE:-262144}"
+LARGE_WORK_US="${LARGE_WORK_US:-2000}"
 
 case "$SWEEP" in
   large_pct) VALUES="${VALUES:-0.1 0.25 0.5 1 2 4}" ;;
@@ -48,7 +49,7 @@ esac
 
 mkdir -p "$OUTDIR"
 echo "arm=$ARM sweep=$SWEEP values=[$VALUES] repeats=$REPEATS duration=${DURATION}s"
-echo "fixed: conns=$CONNS workers=$WORKERS rate=$RATE large_pct=$LARGE_PCT large_size=$LARGE_SIZE"
+echo "fixed: conns=$CONNS workers=$WORKERS rate=$RATE large_pct=$LARGE_PCT large_size=$LARGE_SIZE large_work_us=$LARGE_WORK_US"
 
 for v in $VALUES; do
   c=$CONNS; w=$WORKERS; r=$RATE; lp=$LARGE_PCT; ls=$LARGE_SIZE
@@ -79,7 +80,7 @@ for v in $VALUES; do
     threads=$(( c < 4 ? c : 4 ))
     ./build/loadgen --port "$PORT" --conns "$c" --threads "$threads" \
         --rate "$r" --duration "$DURATION" --warmup "$WARMUP" \
-        --large-pct "$lp" --large-size "$ls" --arm "$ARM" \
+        --large-pct "$lp" --large-size "$ls" --large-work-us "$LARGE_WORK_US" --arm "$ARM" \
         --out "$OUTDIR/${tag}.json" >/dev/null
 
     kill -TERM $srv 2>/dev/null || true
