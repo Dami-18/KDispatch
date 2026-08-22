@@ -11,8 +11,12 @@
  * whole parser is one load and a return.
  *
  * This file is the readable form of the program. server_kcm.cpp emits the
- * identical two instructions directly through bpf(2), so the project builds
- * and runs without clang or libbpf. To build this version instead:
+ * equivalent three instructions directly through bpf(2), so the project builds
+ * and runs without clang or libbpf. The hand-written version uses LD_ABS, which
+ * takes its skb pointer implicitly from r6 and so needs an "r6 = r1" prologue;
+ * the C version below sidesteps that by calling a helper instead.
+ *
+ * To build this version instead:
  *
  *   clang -O2 -g -target bpf -c bpf/kcm_parser.bpf.c -o bpf/kcm_parser.bpf.o
  */

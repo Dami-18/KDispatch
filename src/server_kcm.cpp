@@ -64,8 +64,13 @@ std::array<std::mutex, MAX_CONNS> g_conn_lock;
 
 // The stream parser, as raw bytecode:
 //
-//   r0 = ntohl(*(u32 *)(skb->data + 0));   // BPF_LD_ABS(BPF_W, 0)
+//   r6 = r1;                                // BPF_MOV64_REG(BPF_REG_6, BPF_REG_1)
+//   r0 = ntohl(*(u32 *)(skb->data + 0));    // BPF_LD_ABS(BPF_W, 0)
 //   exit;                                   // return value = message length
+//
+// The r6 move is not optional. LD_ABS is inherited from classic BPF and takes
+// its skb pointer implicitly from r6, never from the context register r1, so
+// without the prologue the verifier rejects the program with "R6 !read_ok".
 //
 // strparser reads the return value as the total length of the message, 0 as
 // "need more bytes", negative as an error. Our header puts a big-endian total
@@ -73,18 +78,21 @@ std::array<std::mutex, MAX_CONNS> g_conn_lock;
 // small enough to emit directly and skip the clang/libbpf build dependency.
 // See bpf/kcm_parser.bpf.c for the same program written in C.
 int load_parser_prog() {
-    bpf_insn insns[2];
+    bpf_insn insns[3];
     std::memset(insns, 0, sizeof(insns));
-    insns[0].code = BPF_LD | BPF_W | BPF_ABS;
-    insns[0].imm = 0;
-    insns[1].code = BPF_JMP | BPF_EXIT;
+    insns[0].code = BPF_ALU64 | BPF_MOV | BPF_X;  // r6 = r1 (skb), for LD_ABS
+    insns[0].dst_reg = BPF_REG_6;
+    insns[0].src_reg = BPF_REG_1;
+    insns[1].code = BPF_LD | BPF_W | BPF_ABS;     // r0 = ntohl(u32 at offset imm)
+    insns[1].imm = 0;
+    insns[2].code = BPF_JMP | BPF_EXIT;
 
     char log[8192];
     log[0] = '\0';
     union bpf_attr attr;
     std::memset(&attr, 0, sizeof(attr));
     attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
-    attr.insn_cnt = 2;
+    attr.insn_cnt = 3;
     attr.insns = (std::uint64_t)(unsigned long)insns;
     attr.license = (std::uint64_t)(unsigned long)"GPL";
     attr.log_level = 1;
@@ -97,8 +105,12 @@ int load_parser_prog() {
         if (log[0]) std::fprintf(stderr, "verifier log:\n%s\n", log);
         if (errno == EPERM)
             std::fprintf(stderr,
-                "hint: loading a socket filter needs CAP_BPF; run under sudo or set "
-                "kernel.unprivileged_bpf_disabled=0\n");
+                "hint: loading a socket filter needs CAP_BPF; run 'sudo scripts/setcap.sh' "
+                "or run under sudo\n");
+        else if (errno == EACCES)
+            std::fprintf(stderr,
+                "hint: EACCES is the verifier rejecting the program, not a permissions "
+                "problem -- sudo will not help. See the log above.\n");
     }
     return fd;
 }
@@ -168,6 +180,7 @@ void worker_loop(int kcm_fd, WorkerStats* stats) {
 
 int main(int argc, char** argv) {
     int port = 9000, nworkers = 4;
+    bool check_only = false;   // load the parser, report, exit
     std::string out;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -175,6 +188,7 @@ int main(int argc, char** argv) {
         if (a == "--port") port = std::stoi(next());
         else if (a == "--workers") nworkers = std::stoi(next());
         else if (a == "--out") out = next();
+        else if (a == "--check-bpf") check_only = true;
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
 
@@ -185,6 +199,10 @@ int main(int argc, char** argv) {
 
     const int prog_fd = load_parser_prog();
     if (prog_fd < 0) return 1;
+    if (check_only) {
+        std::fprintf(stderr, "BPF stream parser loaded OK (prog_fd=%d)\n", prog_fd);
+        return 0;
+    }
 
     // One multiplexor; one cloned KCM socket per worker. The kernel picks a
     // ready clone for each completed message -- that is the work conservation.
