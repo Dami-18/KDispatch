@@ -213,11 +213,6 @@ int main(int argc, char** argv) {
     }
 
     std::vector<WorkerStats> stats((std::size_t)nworkers);
-    std::vector<std::thread> threads;
-    for (int i = 0; i < nworkers; ++i) {
-        threads.emplace_back(worker_loop, worker_fds[(std::size_t)i], &stats[(std::size_t)i]);
-    }
-
     const int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -232,6 +227,13 @@ int main(int argc, char** argv) {
         ::fcntl(lfd, F_SETFL, fl | O_NONBLOCK);
     }
     std::fprintf(stderr, "[server_kcm] port=%d workers=%d\n", port, nworkers);
+
+    // Spawned only once the listener is up: a failure below this point would
+    // return from main with joinable threads, which aborts.
+    std::vector<std::thread> threads;
+    for (int i = 0; i < nworkers; ++i) {
+        threads.emplace_back(worker_loop, worker_fds[(std::size_t)i], &stats[(std::size_t)i]);
+    }
 
     std::vector<int> attached;
     std::uint64_t nattached = 0;

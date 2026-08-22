@@ -247,10 +247,6 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<Worker>> workers;
     std::vector<std::thread> threads;
     for (int i = 0; i < nworkers; ++i) workers.push_back(std::make_unique<Worker>(i));
-    for (int i = 0; i < nworkers; ++i) {
-        threads.emplace_back([w = workers[i].get()] { w->run(); });
-    }
-
     int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
     int one = 1;
     ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -262,6 +258,12 @@ int main(int argc, char** argv) {
     if (::listen(lfd, 1024) < 0) { std::perror("listen"); return 1; }
     set_nonblock(lfd);
     std::fprintf(stderr, "[server_userspace] port=%d workers=%d\n", port, nworkers);
+
+    // Spawned only once the listener is up: a failure below this point would
+    // return from main with joinable threads, which aborts.
+    for (int i = 0; i < nworkers; ++i) {
+        threads.emplace_back([w = workers[i].get()] { w->run(); });
+    }
 
     // Round-robin assignment: deterministic shards, unlike SO_REUSEPORT hashing.
     std::uint64_t next = 0;
