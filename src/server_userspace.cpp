@@ -9,8 +9,8 @@
 // Usage:
 //   server_userspace --port 9000 --workers 4 --out results/serverA.json
 
-#include "hist.hpp"
 #include "proto.hpp"
+#include "server_stats.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -47,14 +47,6 @@ struct Conn {
     std::vector<char> out;
     std::size_t out_off = 0;
     bool want_out = false;
-};
-
-struct WorkerStats {
-    std::uint64_t busy_ns = 0;
-    std::uint64_t idle_ns = 0;
-    std::uint64_t msgs = 0;
-    std::uint64_t bytes_in = 0;
-    std::uint64_t conns = 0;
 };
 
 void set_nonblock(int fd) {
@@ -202,6 +194,8 @@ private:
             if (avail < len) break;
             c.in_off += len;
 
+            if (h.flags & FLAG_HELLO) continue;  // connection announcement, no reply
+
             // --- the RPC itself, on the same thread that did the reassembly
             busy_spin_us(h.work_us);
             ++stats_.msgs;
@@ -286,35 +280,10 @@ int main(int argc, char** argv) {
 
     for (auto& t : threads) t.join();
 
-    if (!out.empty()) {
-        FILE* f = std::fopen(out.c_str(), "w");
-        if (f) {
-            std::uint64_t msgs = 0;
-            double busy_sum = 0, busy_min = 1e9, busy_max = -1e9;
-            std::fprintf(f, "{\n  \"arm\": \"userspace\",\n  \"workers\": %d,\n", nworkers);
-            std::fprintf(f, "  \"per_worker\": [");
-            for (std::size_t i = 0; i < workers.size(); ++i) {
-                const auto& s = workers[i]->stats();
-                const double tot = double(s.busy_ns + s.idle_ns);
-                const double busy_pct = tot > 0 ? 100.0 * double(s.busy_ns) / tot : 0.0;
-                msgs += s.msgs;
-                busy_sum += busy_pct;
-                busy_min = std::min(busy_min, busy_pct);
-                busy_max = std::max(busy_max, busy_pct);
-                std::fprintf(f, "%s\n    {\"id\": %zu, \"msgs\": %llu, \"conns\": %llu, \"busy_pct\": %.2f}",
-                             i ? "," : "", i, (unsigned long long)s.msgs,
-                             (unsigned long long)s.conns, busy_pct);
-            }
-            std::fprintf(f, "\n  ],\n");
-            const double mean = busy_sum / double(workers.size());
-            std::fprintf(f, "  \"msgs\": %llu,\n", (unsigned long long)msgs);
-            std::fprintf(f, "  \"worker_busy_pct_mean\": %.2f,\n", mean);
-            std::fprintf(f, "  \"worker_busy_pct_min\": %.2f,\n", busy_min);
-            std::fprintf(f, "  \"worker_busy_pct_max\": %.2f,\n", busy_max);
-            // Imbalance is the direct evidence for (lack of) work conservation.
-            std::fprintf(f, "  \"worker_busy_pct_spread\": %.2f\n}\n", busy_max - busy_min);
-            std::fclose(f);
-        }
-    }
+    std::vector<WorkerStats> stats;
+    stats.reserve(workers.size());
+    for (auto& w : workers) stats.push_back(w->stats());
+    write_server_json(out, "userspace", stats);
+
     return 0;
 }
