@@ -1,11 +1,16 @@
+# build output
 build/
 figs/
 compile_commands.json
 *.o
+
+# kernel module build artifacts
 *.ko
 *.mod*
 *.cmd
 Module.symvers
 modules.order
+
+# measurement output -- regenerate with scripts/run_sweep.sh
 results/*.json
 !results/.gitkeep
