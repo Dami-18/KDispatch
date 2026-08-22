@@ -193,6 +193,7 @@ void worker_loop(int kcm_fd, WorkerStats* stats) {
 
 int main(int argc, char** argv) {
     int port = 9000, nworkers = 4;
+    int rcvbuf_want = DEFAULT_RCVBUF;
     bool check_only = false;   // load the parser, report, exit
     std::string out;
     for (int i = 1; i < argc; ++i) {
@@ -202,6 +203,7 @@ int main(int argc, char** argv) {
         else if (a == "--workers") nworkers = std::stoi(next());
         else if (a == "--out") out = next();
         else if (a == "--check-bpf") check_only = true;
+        else if (a == "--rcvbuf") rcvbuf_want = std::stoi(next());
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
 
@@ -237,10 +239,18 @@ int main(int argc, char** argv) {
     }
 
     // Bounded recv so workers can observe g_stop instead of blocking forever.
+    //
+    // The KCM socket carries its own receive buffer, separate from the
+    // transport socket's. Completed messages are queued against it, so it too
+    // has to be able to hold a whole message -- otherwise delivery wedges with
+    // no error counter incremented anywhere.
     for (int fd : worker_fds) {
         timeval tv{};
         tv.tv_usec = 100 * 1000;
         ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        const int eff = set_rcvbuf(fd, rcvbuf_want);
+        if (fd == worker_fds.front())
+            std::fprintf(stderr, "[server_kcm] kcm socket sk_rcvbuf=%d bytes\n", eff);
     }
 
     std::vector<WorkerStats> stats((std::size_t)nworkers);
@@ -276,7 +286,7 @@ int main(int argc, char** argv) {
             break;
         }
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-        const int rcvbuf = set_rcvbuf(fd, DEFAULT_RCVBUF);
+        const int rcvbuf = set_rcvbuf(fd, rcvbuf_want);
         if (nattached == 0) report_rcvbuf("server_kcm", rcvbuf);
         g_rcvbuf.store(rcvbuf, std::memory_order_relaxed);
 

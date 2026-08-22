@@ -39,6 +39,7 @@ using namespace kd;
 namespace {
 
 std::atomic<bool> g_stop{false};
+int g_rcvbuf_want = DEFAULT_RCVBUF;   // set once from argv before workers start
 void on_signal(int) { g_stop.store(true, std::memory_order_relaxed); }
 
 struct Conn {
@@ -123,7 +124,7 @@ private:
             set_nonblock(fd);
             int one = 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-            const int rcvbuf = set_rcvbuf(fd, DEFAULT_RCVBUF);
+            const int rcvbuf = set_rcvbuf(fd, g_rcvbuf_want);
             if (stats_.conns == 0 && id_ == 0) report_rcvbuf("server_userspace", rcvbuf);
             epoll_event ev{};
             ev.events = EPOLLIN;
@@ -233,6 +234,7 @@ private:
 
 int main(int argc, char** argv) {
     int port = 9000, nworkers = 4;
+    int rcvbuf_want = DEFAULT_RCVBUF;
     std::string out;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -240,8 +242,11 @@ int main(int argc, char** argv) {
         if (a == "--port") port = std::stoi(next());
         else if (a == "--workers") nworkers = std::stoi(next());
         else if (a == "--out") out = next();
+        else if (a == "--rcvbuf") rcvbuf_want = std::stoi(next());
         else { std::fprintf(stderr, "unknown arg %s\n", a.c_str()); return 2; }
     }
+
+    g_rcvbuf_want = rcvbuf_want;
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
