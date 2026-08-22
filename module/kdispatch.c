@@ -268,24 +268,40 @@ static void kd_detach(struct kd_conn *conn)
 
 /* ------------------------------------------------------------ file ops */
 
-/* strp_unpause() is documented as safe without the socket lock; it only clears
- * the flag and queues the parser's work item.
+/*
+ * strp_unpause() is documented as safe without the socket lock, but nothing
+ * promises it is safe in atomic context -- so collect the parsers to resume
+ * under the queue lock and call it after dropping the lock. Connections are
+ * only freed on last close, when no reader is running, so the pointers stay
+ * valid across the unlock.
+ *
+ * Resuming at most KD_UNPAUSE_BATCH per read keeps this bounded; anything left
+ * paused is picked up by the next read that finds the queue drained.
  */
+#define KD_UNPAUSE_BATCH 16
+
 static void kd_maybe_unpause(struct kd_dev *dev)
 {
+	struct kd_conn *batch[KD_UNPAUSE_BATCH];
 	struct kd_conn *conn;
 	unsigned long flags;
+	int n = 0, i;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->qlen <= queue_low) {
 		list_for_each_entry(conn, &dev->conns, list) {
-			if (conn->paused) {
-				conn->paused = false;
-				strp_unpause(&conn->strp);
-			}
+			if (!conn->paused)
+				continue;
+			conn->paused = false;
+			batch[n++] = conn;
+			if (n == KD_UNPAUSE_BATCH)
+				break;
 		}
 	}
 	spin_unlock_irqrestore(&dev->lock, flags);
+
+	for (i = 0; i < n; i++)
+		strp_unpause(&batch[i]->strp);
 }
 
 static ssize_t kd_read(struct file *file, char __user *ubuf, size_t count,
