@@ -34,7 +34,7 @@ Workload: 128 B / 10 µs "small" RPCs, with 1% "large" ones carrying an identica
 32 connections, 30k msg/s offered, 5 s runs, median of 3 repeats. Every run
 reconciles exactly (`sent == recvd`), with no parser aborts or desyncs.
 
-![small-message p99 vs worker threads](docs/p99_small_by_workers.png)
+![small-message p99 vs worker threads](plots/p99_small_by_workers.png)
 
 Small-message p99, in µs:
 
@@ -95,7 +95,7 @@ well as across connections. Driving all load down one connection isolates that:
 with 8 workers available, arm A can use exactly one of them, because a worker
 owns the connection.
 
-![small-message p99 vs connections](docs/p99_small_by_conns.png)
+![small-message p99 vs connections](plots/p99_small_by_conns.png)
 
 Small-message p99 at fixed 8 workers, 30k msg/s, varying how many connections
 the load is spread over:
@@ -193,18 +193,33 @@ behind a large one. Kept as a control.
 ## Layout
 
 ```
-include/proto.hpp   wire format (length-prefixed, BPF-parseable header)
-include/hist.hpp    log-bucketed latency histogram, ~3% relative precision
-src/server_userspace.cpp   arm A
+include/proto.hpp          wire format (length-prefixed, BPF-parseable header)
+include/hist.hpp           log-bucketed latency histogram, ~3% relative precision
+include/netutil.hpp        socket tuning shared by every arm
+include/server_stats.hpp   per-worker accounting, identical JSON across arms
+include/kdispatch_uapi.h   device ABI shared by the module and its server
+
 src/loadgen.cpp            open-loop generator + reply reader
-src/server_kcm.cpp         arm B
-src/server_module.cpp      arm C
-bpf/kcm_parser.bpf.c       KCM stream parser, reference form
+src/server_userspace.cpp   arm A -- userspace reassembly, workers sharded by connection
+src/server_kcm.cpp         arm B -- AF_KCM + BPF stream parser
+src/server_module.cpp      arm C -- reads whole messages from /dev/kdispatch
+
+bpf/kcm_parser.bpf.c       arm B's parser in readable C (the server emits it as bytecode)
 module/kdispatch.c         work-conserving in-kernel dispatcher
-include/kdispatch_uapi.h   device ABI shared by module and server
-scripts/run_sweep.sh       connection-count sweep
-scripts/plot.py            graphs from results/*.json
+module/Makefile            Kbuild for the module
+
+scripts/setcap.sh          grant server_kcm CAP_BPF (re-run after every rebuild)
+scripts/load_module.sh     build + insmod the module, or unload it
+scripts/smoke_kcm.sh       arms A and B side by side at one operating point
+scripts/run_sweep.sh       sweep one axis for one arm
+scripts/slo_ladder.sh      binary search for throughput-under-SLO
+scripts/plot.py            graphs from a directory of result JSON
+
+plots/                     committed figures used by this README
 ```
+
+Result JSON is written to `results/` (or whatever `OUTDIR` names) and is not
+tracked -- regenerate it with the commands under [Running](#running).
 
 ## Requirements
 
@@ -278,6 +293,7 @@ sudo scripts/load_module.sh unload
 **One arm by hand:**
 
 ```bash
+mkdir -p results
 ./build/server_module --port 9000 --workers 8 --out results/srv.json &
 ./build/loadgen --port 9000 --conns 32 --threads 8 --rate 30000 \
                 --duration 5 --warmup 1 --large-pct 1 \

@@ -12,7 +12,4 @@ Module.symvers
 modules.order
 
 # measurement output -- regenerate with scripts/run_sweep.sh
-results/*.json
-!results/.gitkeep
-results/*.log
-results_conns/
+results*/
