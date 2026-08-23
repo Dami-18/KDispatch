@@ -95,6 +95,8 @@ well as across connections. Driving all load down one connection isolates that:
 with 8 workers available, arm A can use exactly one of them, because a worker
 owns the connection.
 
+![small-message p99 vs connections](docs/p99_small_by_conns.png)
+
 Small-message p99 at fixed 8 workers, 30k msg/s, varying how many connections
 the load is spread over:
 
