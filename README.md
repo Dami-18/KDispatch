@@ -206,42 +206,166 @@ scripts/run_sweep.sh       connection-count sweep
 scripts/plot.py            graphs from results/*.json
 ```
 
-## Build and run
+## Requirements
+
+| | |
+| --- | --- |
+| OS | Linux with `CONFIG_AF_KCM=m` and `CONFIG_STREAM_PARSER=y` |
+| Compiler | C++23 (GCC 13+ or Clang 16+), CMake ≥ 3.20 |
+| Arm B | `libcap` tools (`setcap`/`getcap`), and `CAP_BPF` to load the parser |
+| Arm C | kernel headers matching the running kernel |
+| Plots | Python 3 with `matplotlib` |
+
+No `clang` or `libbpf` needed: arm B's stream parser is three instructions,
+emitted directly through `bpf(2)`. `bpf/kcm_parser.bpf.c` is the readable
+equivalent, kept for documentation.
+
+```bash
+sudo apt install -y build-essential cmake linux-headers-$(uname -r) \
+                    libcap2-bin python3-matplotlib
+```
+
+## Setup
+
+**1. Check the kernel supports what the arms need.**
+
+```bash
+grep -E 'CONFIG_AF_KCM|CONFIG_STREAM_PARSER' /boot/config-$(uname -r)
+sudo modprobe kcm && lsmod | grep kcm
+```
+
+Want `CONFIG_AF_KCM=m` and `CONFIG_STREAM_PARSER=y`. If `AF_KCM` is missing,
+arms A and C still work; arm B does not.
+
+**2. Build the userspace binaries.**
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ```
 
-Arm B loads a BPF stream parser, which needs `CAP_BPF`. Grant it once per build
-(file capabilities live on the inode, so any relink clears them):
+**3. Grant arm B its capability.** Loading a socket filter needs `CAP_BPF`.
+File capabilities live on the inode, so **this must be re-run after every
+rebuild that relinks `server_kcm`**:
 
 ```bash
 sudo scripts/setcap.sh
-./build/server_kcm --check-bpf        # should print "loaded OK"
+./build/server_kcm --check-bpf      # expect: BPF stream parser loaded OK
 ```
 
-Arm C needs the kernel module loaded (rebuilds and `insmod`s; creates
-`/dev/kdispatch` mode 0666, so the server itself runs unprivileged):
+**4. Build and load the arm C module.** It creates `/dev/kdispatch` mode 0666,
+so the server itself runs unprivileged:
 
 ```bash
 sudo scripts/load_module.sh
-sudo scripts/load_module.sh unload   # when done
 ```
 
-Side-by-side comparison at one operating point, and the full sweep:
+**5. For real measurements**, pin the clock — otherwise DVFS shows up in the
+tails:
+
+```bash
+sudo cpupower frequency-set -g performance
+echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
+```
+
+**Teardown:**
+
+```bash
+sudo scripts/load_module.sh unload
+```
+
+## Running
+
+**One arm by hand:**
+
+```bash
+./build/server_module --port 9000 --workers 8 --out results/srv.json &
+./build/loadgen --port 9000 --conns 32 --threads 8 --rate 30000 \
+                --duration 5 --warmup 1 --large-pct 1 \
+                --large-size 128 --large-work-us 2000 \
+                --arm module --out results/run.json
+kill %1
+```
+
+Swap `server_module` for `server_userspace` (arm A) or `server_kcm` (arm B).
+
+**Side-by-side smoke test** (arms A and B at one operating point):
 
 ```bash
 scripts/smoke_kcm.sh
-scripts/run_sweep.sh module workers
-python3 scripts/plot.py results/ -o figs/
 ```
 
-Full sweep and graphs:
+**Sweeps.** One axis, one arm, JSON per run into `results/`:
 
 ```bash
-scripts/run_sweep.sh userspace
+scripts/run_sweep.sh <arm> <axis>     # arm: userspace | kcm | module
+```
+
+| axis | values swept | what it shows |
+| --- | --- | --- |
+| `workers` | 2…32 threads | how much parallelism each design needs |
+| `conns` | 1…32 connections | HOL blocking within vs across connections |
+| `large_pct` | 0.1…4% | sensitivity to slow-request mix |
+| `rate` | 10k…120k msg/s | load/latency curve |
+| `large_size` | 16 KB…384 KB | the `strparser`/`sk_rcvbuf` ceiling |
+
+Fixed points are set by environment variables, so the swept axis is the only
+thing that varies:
+
+```bash
+CONNS=32 RATE=30000 WORKERS=8 DURATION=5 WARMUP=1 \
+LARGE_PCT=1 LARGE_SIZE=128 LARGE_WORK_US=2000 REPEATS=3 \
+  scripts/run_sweep.sh module workers
+```
+
+**Throughput-under-SLO** — binary search for the highest load meeting a p99
+target:
+
+```bash
+SLO_US=500 CONNS=32 WORKERS=8 STEPS=11 scripts/slo_ladder.sh module
+```
+
+**Plots.** Detects the varying axis and overlays every arm present:
+
+```bash
 python3 scripts/plot.py results/ -o figs/
 ```
+
+### Reproducing the tables above
+
+```bash
+# workers sweep, all three arms  ->  the headline graph
+for arm in userspace kcm module; do
+  CONNS=32 RATE=30000 DURATION=5 WARMUP=1 LARGE_PCT=1 \
+  LARGE_SIZE=128 LARGE_WORK_US=2000 VALUES="2 4 8 16 32" REPEATS=3 \
+    scripts/run_sweep.sh $arm workers
+done
+python3 scripts/plot.py results/ -o figs/
+
+# connection sweep  ->  within- vs across-connection blocking
+for arm in userspace kcm module; do
+  WORKERS=8 RATE=30000 DURATION=4 WARMUP=1 LARGE_PCT=1 \
+  LARGE_SIZE=128 LARGE_WORK_US=2000 VALUES="1 2 4 8 16 32" REPEATS=1 \
+  OUTDIR=results_conns scripts/run_sweep.sh $arm conns
+done
+python3 scripts/plot.py results_conns/ -o figs_conns/
+
+# throughput-under-SLO
+for arm in userspace kcm module; do
+  SLO_US=500 CONNS=32 WORKERS=8 STEPS=11 scripts/slo_ladder.sh $arm
+done
+```
+
+## Troubleshooting
+
+| symptom | cause and fix |
+| --- | --- |
+| `BPF_PROG_LOAD failed: Operation not permitted` | `EPERM` — missing `CAP_BPF`. Run `sudo scripts/setcap.sh`; a rebuild clears it. |
+| `BPF_PROG_LOAD failed: Permission denied` | `EACCES` — the *verifier* rejected the program. `sudo` will not help; read the verifier log printed beneath. |
+| `open /dev/kdispatch: No such file` | module not loaded — `sudo scripts/load_module.sh`. It does not survive a reboot. |
+| `bind: Address already in use` | a server from an earlier run is still holding the port. Find it with `ss -ltnp` and kill it by PID. |
+| `--large-size N exceeds the achievable sk_rcvbuf` | raise `net.core.rmem_max`, or lower `--large-size`. See the buffer-ceiling section above. |
+| results files unwritable after a `sudo` run | they are owned by root; `sudo chown -R $USER results/`. |
+| a server ignores `SIGTERM` | known: a worker can block in a reply `write()`. The sweep scripts escalate to `SIGKILL` after 6 s. |
 
 ## Measurement notes
 
@@ -267,10 +391,3 @@ For real runs, pin the cores and fix the clock:
 sudo cpupower frequency-set -g performance
 echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
 ```
-
-## Requirements
-
-- Linux with `CONFIG_AF_KCM=m` and `CONFIG_STREAM_PARSER=y` (needed for arm B)
-- C++23 compiler, CMake ≥ 3.20
-- clang + libbpf for the arm B parser
-- kernel headers for arm C
