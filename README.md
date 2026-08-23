@@ -13,7 +13,7 @@ KDispatch measures that effect and compares three ways of getting messages from
 the wire to a worker thread.
 
 | Arm | What it does |
-| --- | --- | --- |
+| --- | --- |
 | **A — userspace** | epoll server, per-connection reassembly, workers sharded by connection (what gRPC-style stacks do) |
 | **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message |
 | **C — module** | custom kernel module on `strparser` with a single shared, work-conserving message queue |
