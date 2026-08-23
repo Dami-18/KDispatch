@@ -67,6 +67,68 @@ So framing is not what governs the tail — **dispatch policy is**. That is exac
 the gap Rakaia identifies when it reports up to 5× higher throughput-under-SLO
 than KCM, reproduced here from scratch.
 
+### Throughput-under-SLO
+
+The metric Rakaia reports, so the one that makes these results comparable in kind
+to the paper's: the highest offered load at which small-message p99 stays under a
+target. Found by binary search on offered rate (`scripts/slo_ladder.sh`), where a
+rate passes only if p99 meets the SLO **and** the generator kept its schedule
+(achieved >= 95% of offered) **and** no messages were lost — otherwise the number
+would describe the load generator rather than the server.
+
+SLO = 500 µs p99, 32 connections, 8 workers, 11-step search (converged to ~1%):
+
+| arm | throughput-under-SLO | vs userspace |
+| --- | --- | --- |
+| A userspace | 6,856 msg/s | — |
+| B KCM | 7,439 msg/s | 1.09× |
+| **C module** | **115,878 msg/s** | **16.9×** |
+
+Arm C sustains **16.9× the load** of the userspace baseline and **15.6× KCM's**
+at the same tail-latency target. KCM's 1.09× over userspace is the same null
+result the latency numbers show, expressed as throughput.
+
+### Head-of-line blocking within a single connection
+
+The paper notes that a stream API induces HOL blocking *within* a connection as
+well as across connections. Driving all load down one connection isolates that:
+with 8 workers available, arm A can use exactly one of them, because a worker
+owns the connection.
+
+Small-message p99 at fixed 8 workers, 30k msg/s, varying how many connections
+the load is spread over:
+
+| conns | A userspace | B KCM | **C module** | A/C | B/C |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 42992 µs | 1770 µs | **63 µs** | **677×** | 28× |
+| 2 | 7209 µs | 1770 µs | **52 µs** | 138× | 34× |
+| 4 | 3539 µs | 1737 µs | **44 µs** | 80× | 39× |
+| 8 | 2032 µs | 1737 µs | **45 µs** | 45× | 39× |
+| 16 | 1901 µs | 1704 µs | **41 µs** | 46× | 42× |
+| 32 | 1835 µs | 1737 µs | **42 µs** | 44× | 41× |
+
+Three distinct behaviours:
+
+- **Arm A is connection-count bound.** One connection means one usable worker, so
+  p99 is 43 ms; spreading the same load over 32 connections recovers most of it.
+  The parallelism available to the application is capped by how the client
+  happens to shard its traffic.
+- **KCM is flat at ~1740 µs and never better.** It does fix the single-connection
+  case (1770 µs versus 43 ms), because it releases its reservation once userspace
+  has received the message, so one connection's messages can reach several
+  workers. But it never approaches the module at any connection count.
+- **Arm C is flat at 41–63 µs**, which is essentially its own p50. Blocking is
+  gone in both directions, and performance no longer depends on client sharding.
+
+### KCM drops messages at low connection counts
+
+Across four independent sweeps, the KCM arm loses messages — 343 at 1 connection,
+400 at 2, 414 at several worker counts — always at low connection counts, never
+in arm A or arm C, with no counter in `/proc/net/kcm_stats` reporting a drop and
+no parser abort. Reproducible, but the mechanism is not identified here. Any KCM
+latency figure at those points should be read as "KCM misbehaves" rather than as
+a clean measurement.
+
 ### Arm C is fastest in the middle, and that is not a bug
 
 Arm C's curve is U-shaped: best at 8 workers (42 µs), worse at 32 (426 µs). One
