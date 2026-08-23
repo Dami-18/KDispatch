@@ -15,3 +15,4 @@ modules.order
 results/*.json
 !results/.gitkeep
 results/*.log
+results_conns/
