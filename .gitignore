@@ -1,6 +1,6 @@
 # build output
 build*/
-figs/
+figs*/
 compile_commands.json
 *.o
 
