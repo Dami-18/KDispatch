@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 
 namespace kd {
@@ -35,6 +36,21 @@ inline int set_rcvbuf(int fd, int want) {
 }
 
 inline constexpr int DEFAULT_RCVBUF = 8 * 1024 * 1024;  // capped by rmem_max
+
+// Bound how long a reply write may block.
+//
+// Arms B and C reply with a plain blocking write() from a worker thread. If the
+// client vanishes mid-run with a full send buffer, that write never returns:
+// the worker is stuck, SIGTERM cannot land, and the server has to be SIGKILLed
+// while the sweep harness waits on it forever. A send timeout turns that into a
+// failed write on one connection instead of a wedged server.
+inline void set_sndtimeo(int fd, int seconds) {
+    ::timeval tv{};
+    tv.tv_sec = seconds;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+}
+
+inline constexpr int DEFAULT_SNDTIMEO_S = 5;
 
 // Report the effective buffer once, with the ceiling it implies on message
 // size. A message above this is not a slow path -- it kills the connection.

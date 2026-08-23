@@ -9,6 +9,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# SIGTERM, then SIGKILL if the server does not go away. A wedged server would
+# otherwise block the whole sweep on `wait`.
+stop_server() {
+  local pid=$1 i
+  kill -TERM "$pid" 2>/dev/null || true
+  for ((i=0; i<30; i++)); do
+    kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null || true; return; }
+    sleep 0.2
+  done
+  echo "  server $pid ignored SIGTERM, killing" >&2
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 if [[ $EUID -ne 0 ]] && ! getcap build/server_kcm 2>/dev/null | grep -q cap_bpf; then
   echo "server_kcm cannot load its BPF parser as an unprivileged user." >&2
   echo "run 'sudo scripts/setcap.sh', or re-run this script under sudo." >&2
@@ -55,8 +69,7 @@ run() {
       --large-pct "$LARGE_PCT" --arm "$arm" \
       --out "results/smoke_${arm}.json" >/dev/null
 
-  kill -TERM $srv 2>/dev/null || true
-  wait $srv 2>/dev/null || true
+  stop_server $srv
   trap - EXIT
   sleep 0.5
 }

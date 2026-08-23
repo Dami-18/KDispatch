@@ -198,6 +198,7 @@ int main(int argc, char** argv) {
             break;
         }
         ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        set_sndtimeo(fd, DEFAULT_SNDTIMEO_S);
         const int rcvbuf = set_rcvbuf(fd, rcvbuf_want);
         if (nattached == 0) report_rcvbuf("server_module", rcvbuf);
 
