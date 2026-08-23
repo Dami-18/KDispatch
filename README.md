@@ -18,13 +18,44 @@ the wire to a worker thread.
 | **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message |
 | **C — module** | custom kernel module on `strparser` with a single shared, work-conserving message queue |
 
-Scoped-down exploration of ideas from
+Scoped-down exploration of
 [*Rakaia: Scalable In-Kernel Scheduling for TCP-Based RPCs*](https://www.usenix.org/conference/osdi26/technical-sessions)
-(Yang, Prasopoulos, Bugnion — EPFL, OSDI '26). This is not a reimplementation:
-Rakaia does work-conserving scheduling in the TCP receive path with kTLS support
-and a patched gRPC. KDispatch reproduces the *problem*, measures how far the existing in-kernel
-message API gets you, and implements a minimal work-conserving dispatcher to
-close the gap.
+(Yang, Prasopoulos, Bugnion — EPFL, OSDI '26).
+
+KDispatch implements the paper's core mechanism — recover message boundaries in
+the kernel's TCP receive path, then dispatch each completed message
+work-conservingly to whichever worker is free — and measures it against both
+baselines the paper uses.
+
+### What is implemented, and what is not
+
+`module/kdispatch.c` hooks `sk_data_ready` and runs `strparser` in the TCP
+receive path, so parsing happens where the paper puts it. Completed messages go
+onto a single shared queue that any worker can pull from, so no worker is bound
+to a connection. That is the mechanism the results below measure.
+
+It is **not** a reimplementation. What Rakaia has and this does not:
+
+| | Rakaia | KDispatch |
+| --- | --- | --- |
+| Message framing in the TCP receive path | yes | yes |
+| Work-conserving dispatch | yes | yes |
+| Scheduling across many cores | per-core scheduling | **one global queue behind one spinlock** |
+| Send path | messages both ways; userspace never sees TCP | **receive only** — userspace still holds the fds and `write()`s replies |
+| Encrypted traffic | kTLS | **not supported** |
+| Baseline compared against | patched gRPC-Go / gRPC-C++ | **a model** of gRPC's architecture, written here |
+| Workload | Silo/TPC-C, OpenTelemetry Collector | **synthetic** RPCs with a calibrated busy-spin |
+
+The scalability row is the one that shows up in the numbers: a single shared
+queue is a single contention point, which is why arm C is fastest at 8 workers
+and gets worse at 32. See
+[Arm C is fastest in the middle](#arm-c-is-fastest-in-the-middle-and-that-is-not-a-bug).
+
+kTLS is left out deliberately rather than for lack of time: it decides whether
+the approach works on *encrypted* production traffic (TLS terminated in
+userspace would leave the kernel staring at ciphertext, unable to find any
+message boundary at all), but it is orthogonal to head-of-line blocking and
+would not move any number in the tables below.
 
 ## Results
 
