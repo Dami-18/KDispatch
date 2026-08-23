@@ -1,22 +1,22 @@
 # KDispatch
 
-**In-kernel, TCP-aware message dispatch for RPCs — and a measurement rig that shows why it matters.**
+**In-kernel, TCP-aware message dispatch for RPCs**
 
-TCP gives you a byte stream, not messages. RPC frameworks therefore reassemble
+TCP gives byte stream, not messages. RPC frameworks therefore reassemble
 message boundaries in userspace, on I/O threads that own a shard of the
 connections. That couples *reassembly* to *execution*: a worker busy with one
 large message cannot serve a small message that is already complete on another
-connection in its shard. The result is head-of-line (HOL) blocking, and it gets
+connection in its shard. This results in head-of-line (HOL) blocking, and it gets
 worse as connections-per-worker grows.
 
 KDispatch measures that effect and compares three ways of getting messages from
 the wire to a worker thread.
 
-| Arm | What it does | Status |
+| Arm | What it does |
 | --- | --- | --- |
-| **A — userspace** | epoll server, per-connection reassembly, workers sharded by connection (what gRPC-style stacks do) | done |
-| **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message | done |
-| **C — module** | custom kernel module on `strparser` with a single shared, work-conserving message queue | done |
+| **A — userspace** | epoll server, per-connection reassembly, workers sharded by connection (what gRPC-style stacks do) |
+| **B — KCM** | Linux `AF_KCM` + an eBPF length-prefix parser; the kernel delivers whole messages, any worker can take any message |
+| **C — module** | custom kernel module on `strparser` with a single shared, work-conserving message queue |
 
 Scoped-down exploration of ideas from
 [*Rakaia: Scalable In-Kernel Scheduling for TCP-Based RPCs*](https://www.usenix.org/conference/osdi26/technical-sessions)
@@ -29,7 +29,7 @@ close the gap.
 ## Results
 
 Workload: 128 B / 10 µs "small" RPCs, with 1% "large" ones carrying an identical
-128 B payload but 2 ms of service time. Equal payloads on purpose — that isolates
+128 B payload but 2 ms of service time. Equal payloads on purpose - that isolates
 **dispatch** from byte movement, so what is measured is scheduling, not copying.
 32 connections, 30k msg/s offered, 5 s runs, median of 3 repeats. Every run
 reconciles exactly (`sent == recvd`), with no parser aborts or desyncs.
@@ -124,8 +124,8 @@ Three distinct behaviours:
 
 ### KCM drops messages at low connection counts
 
-Across four independent sweeps, the KCM arm loses messages — 343 at 1 connection,
-400 at 2, 414 at several worker counts — always at low connection counts, never
+Across four independent sweeps, the KCM arm loses messages - 343 at 1 connection,
+400 at 2, 414 at several worker counts - always at low connection counts, never
 in arm A or arm C, with no counter in `/proc/net/kcm_stats` reporting a drop and
 no parser abort. Reproducible, but the mechanism is not identified here. Any KCM
 latency figure at those points should be read as "KCM misbehaves" rather than as
@@ -148,11 +148,11 @@ Getting arm B to run at all meant discovering that a message must fit in *two*
 independent receive buffers:
 
 1. **The transport socket's `sk_rcvbuf`.** `strparser` rejects anything longer
-   with `EMSGSIZE` and **aborts the connection** — it does not degrade, it dies.
+   with `EMSGSIZE` and **aborts the connection** - it does not degrade, it dies.
    With the stock `net.ipv4.tcp_rmem` default of 131072, every message above
    ~128 KB kills its connection.
 2. **The KCM socket's own `sk_rcvbuf`.** Completed messages are queued against
-   it. If a message does not fit, delivery **wedges silently** — no counter in
+   it. If a message does not fit, delivery **wedges silently** - no counter in
    `/proc/net/kcm_stats` increments, and the sender simply blocks forever in
    `write()`.
 
@@ -200,9 +200,9 @@ include/server_stats.hpp   per-worker accounting, identical JSON across arms
 include/kdispatch_uapi.h   device ABI shared by the module and its server
 
 src/loadgen.cpp            open-loop generator + reply reader
-src/server_userspace.cpp   arm A -- userspace reassembly, workers sharded by connection
-src/server_kcm.cpp         arm B -- AF_KCM + BPF stream parser
-src/server_module.cpp      arm C -- reads whole messages from /dev/kdispatch
+src/server_userspace.cpp   arm A - userspace reassembly, workers sharded by connection
+src/server_kcm.cpp         arm B - AF_KCM + BPF stream parser
+src/server_module.cpp      arm C - reads whole messages from /dev/kdispatch
 
 bpf/kcm_parser.bpf.c       arm B's parser in readable C (the server emits it as bytecode)
 module/kdispatch.c         work-conserving in-kernel dispatcher
@@ -219,7 +219,7 @@ plots/                     committed figures used by this README
 ```
 
 Result JSON is written to `results/` (or whatever `OUTDIR` names) and is not
-tracked -- regenerate it with the commands under [Running](#running).
+tracked - regenerate it with the commands under [Running](#running).
 
 ## Requirements
 
